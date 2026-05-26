@@ -1,8 +1,8 @@
 #pragma once
 
+#include "app_event.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
-#include "app_event.h"
 
 extern QueueHandle_t ui_queue;
 extern QueueHandle_t storage_queue;

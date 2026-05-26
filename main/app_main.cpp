@@ -8,14 +8,18 @@
 #include "nvs_flash.h"
 #include <stdio.h>
 
-// If using ESP-IDF 5.x/6.x for PSRAM, the API might be esp_psram_get_size()
-// or we can just rely on heap caps.
+// LVGL Port
+#include "esp_lvgl_port.h"
+#include "lvgl.h"
+
 #if __has_include("esp_psram.h")
 #include "esp_psram.h"
 #endif
 
 #include "app_build_info.h"
+#include "app_display.h"
 #include "app_queue.h"
+#include "app_ui.h"
 
 static const char *TAG = "SCRIBE_MAIN";
 
@@ -29,9 +33,22 @@ void app_queue_init() {
 
 void ui_task(void *pvParameters) {
   ESP_LOGI("SCRIBE_UI", "UI Task started");
+
+  // Show the splash screen
+  app_ui_show_splash();
+
   while (1) {
-    ESP_LOGI("SCRIBE_UI", "Heartbeat...");
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    // Handle LVGL timers and UI events
+    if (lvgl_port_lock(0)) {
+      lv_timer_handler();
+      lvgl_port_unlock();
+    }
+
+    AppEvent evt;
+    if (xQueueReceive(ui_queue, &evt, pdMS_TO_TICKS(5))) {
+      // Process UI Event
+      ESP_LOGI("SCRIBE_UI", "Received UI event");
+    }
   }
 }
 
@@ -65,27 +82,14 @@ extern "C" void app_main(void) {
   ESP_LOGI(TAG, "Free internal heap: %lu bytes",
            (unsigned long)esp_get_free_internal_heap_size());
 
-  // Print PSRAM info
-  size_t psram_size = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
-  ESP_LOGI(TAG, "Total PSRAM size: %zu bytes", psram_size);
-
-  // Print partition table
-  esp_partition_iterator_t it = esp_partition_find(
-      ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
-  ESP_LOGI(TAG, "Partition Table:");
-  while (it != NULL) {
-    const esp_partition_t *part = esp_partition_get(it);
-    ESP_LOGI(TAG, " - '%s' at offset 0x%lx, size 0x%lx", part->label,
-             (unsigned long)part->address, (unsigned long)part->size);
-    it = esp_partition_next(it);
-  }
-  esp_partition_iterator_release(it);
+  // Initialize display and LVGL
+  app_display_init();
 
   // Initialize queues
   app_queue_init();
 
   // Create tasks
-  xTaskCreate(ui_task, "ui_task", 4096, NULL, 5, NULL);
+  xTaskCreate(ui_task, "ui_task", 8192, NULL, 5, NULL);
   xTaskCreate(storage_task, "storage_task", 4096, NULL, 4, NULL);
 
   // Watchdog prevention loop

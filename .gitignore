@@ -1,6 +1,7 @@
 # Build output
 build/
 build-*/
+managed_components/
 
 # ESP-IDF configs
 sdkconfig
