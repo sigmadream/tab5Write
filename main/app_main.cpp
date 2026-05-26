@@ -1,27 +1,15 @@
-#include "esp_heap_caps.h"
-#include "esp_log.h"
-#include "esp_mac.h"
-#include "esp_partition.h"
-#include "esp_system.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "nvs_flash.h"
-#include <stdio.h>
-
-// LVGL Port
-#include "esp_lvgl_port.h"
-#include "lvgl.h"
-
-#if __has_include("esp_psram.h")
-#include "esp_psram.h"
-#endif
-
 #include "app_build_info.h"
 #include "app_display.h"
 #include "app_queue.h"
 #include "app_ui.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "nvs_flash.h"
 
-static const char *TAG = "SCRIBE_MAIN";
+static const char *TAG = "TABWRITE_MAIN";
 
 QueueHandle_t ui_queue;
 QueueHandle_t storage_queue;
@@ -32,32 +20,31 @@ void app_queue_init() {
 }
 
 void ui_task(void *pvParameters) {
-  ESP_LOGI("SCRIBE_UI", "UI Task started");
+  (void)pvParameters;
+  ESP_LOGI("TABWRITE_UI", "UI Task started");
 
   // Show the splash screen
-  app_ui_show_splash();
+  if (app_display_lock(0)) {
+    app_ui_show_splash();
+    app_display_unlock();
+  }
 
   while (1) {
-    // Handle LVGL timers and UI events
-    if (lvgl_port_lock(0)) {
-      lv_timer_handler();
-      lvgl_port_unlock();
-    }
-
     AppEvent evt;
-    if (xQueueReceive(ui_queue, &evt, pdMS_TO_TICKS(5))) {
+    if (xQueueReceive(ui_queue, &evt, pdMS_TO_TICKS(10))) {
       // Process UI Event
-      ESP_LOGI("SCRIBE_UI", "Received UI event");
+      ESP_LOGI("TABWRITE_UI", "Received UI event");
     }
   }
 }
 
 void storage_task(void *pvParameters) {
-  ESP_LOGI("SCRIBE_STORAGE", "Storage Task started");
+  (void)pvParameters;
+  ESP_LOGI("TABWRITE_STORAGE", "Storage Task started");
   AppEvent evt;
   while (1) {
     if (xQueueReceive(storage_queue, &evt, portMAX_DELAY)) {
-      ESP_LOGI("SCRIBE_STORAGE", "Received storage request");
+      ESP_LOGI("TABWRITE_STORAGE", "Received storage request");
     }
   }
 }
@@ -72,8 +59,8 @@ extern "C" void app_main(void) {
   }
   ESP_ERROR_CHECK(ret);
 
-  ESP_LOGI(TAG, "Scribe Firmware Booting...");
-  ESP_LOGI(TAG, "Build Timestamp: %s", SCRIBE_BUILD_TIMESTAMP);
+  ESP_LOGI(TAG, "TABWRITE Firmware Booting...");
+  ESP_LOGI(TAG, "Build Timestamp: %s", TABWRITE_BUILD_TIMESTAMP);
   ESP_LOGI(TAG, "Target: %s", CONFIG_IDF_TARGET);
 
   // Print heap info

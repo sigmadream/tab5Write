@@ -11,12 +11,11 @@ void app_ui_show_splash() {
   lv_obj_set_style_bg_color(screen, THEME_BG_PRIMARY, 0);
   lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
-  // Main Title
+  // Main title
   lv_obj_t *title = lv_label_create(screen);
-  lv_label_set_text(title, "Scribe");
+  lv_label_set_text(title, "TABWRITE");
   lv_obj_set_style_text_color(title, THEME_TEXT_PRIMARY, 0);
-  // Use a larger font if available, fallback to Montserrat 20/14
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_20, 0);
   lv_obj_align(title, LV_ALIGN_CENTER, 0, -20);
 
   // Tagline
