@@ -1,18 +1,21 @@
 #pragma once
 
+#include "key_event.h"
+
 #include <stdint.h>
 
-enum class AppEventType { KEY_EVENT, STORAGE_REQUEST, UI_COMMAND };
+enum class AppEventType { KEY_EVENT, INPUT_STATUS, STORAGE_REQUEST, UI_COMMAND };
 
 struct AppEvent {
   AppEventType type;
   union {
+    KeyEvent key;
     struct {
-      uint32_t key_code;
-      uint32_t action;
-      uint32_t modifiers;
-      char printable;
-    } key;
+      bool connected;
+      uint16_t vid;
+      uint16_t pid;
+      uint8_t protocol;
+    } input_status;
     struct {
       uint32_t command;
     } ui;
