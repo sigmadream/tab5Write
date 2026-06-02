@@ -13,6 +13,8 @@
 #include "freertos/task.h"
 #include <inttypes.h>
 #include "nvs_flash.h"
+#include "text_input_composer.h"
+
 
 static const char *TAG = "TABWRITE_MAIN";
 
@@ -48,6 +50,9 @@ void ui_task(void *pvParameters) {
   (void)pvParameters;
   ESP_LOGI("TABWRITE_UI", "UI Task started");
 
+  TextInputComposer composer;
+  std::string committed_text = "";
+
   // Show the splash screen
   if (app_display_lock(0)) {
     app_ui_show_splash();
@@ -61,10 +66,35 @@ void ui_task(void *pvParameters) {
     if (xQueueReceive(ui_queue, &evt, pdMS_TO_TICKS(10))) {
       startup_screen_active = false;
       if (evt.type == AppEventType::KEY_EVENT) {
-        ESP_LOGI("TABWRITE_UI", "Key event %s %s",
-                 key_action_name(evt.key.action), key_code_name(evt.key.code));
+        // IME를 통해 키 이벤트를 처리하여 변환
+        auto tie_events = composer.handle_key_event(evt.key);
+
+        for (const auto &tie : tie_events) {
+          if (tie.type == TextInputEventType::COMMIT_TEXT) {
+            committed_text += tie.text;
+            ESP_LOGI("TABWRITE_UI", "COMMIT_TEXT: %s", tie.text.c_str());
+          } else if (tie.type == TextInputEventType::DELETE_BACKWARD) {
+            // 안전한 UTF-8 백스페이스
+            if (!committed_text.empty()) {
+              size_t pop_count = 1;
+              while (pop_count < committed_text.size() &&
+                     (static_cast<unsigned char>(committed_text[committed_text.size() - pop_count]) & 0xC0) == 0x80) {
+                pop_count++;
+              }
+              committed_text.resize(committed_text.size() - pop_count);
+            }
+            ESP_LOGI("TABWRITE_UI", "DELETE_BACKWARD");
+          } else if (tie.type == TextInputEventType::COMMAND) {
+            ESP_LOGI("TABWRITE_UI", "COMMAND: %d", (int)tie.command_code);
+            if (tie.command_code == KeyCode::ESCAPE) {
+              committed_text.clear();
+            }
+          }
+        }
+
         if (app_display_lock(50)) {
-          app_ui_show_key_event(evt.key);
+          app_ui_show_ime_status(committed_text, composer.get_composing_text(),
+                                 composer.get_input_mode() == InputMode::KOREAN, evt.key);
           app_display_unlock();
         }
       } else if (evt.type == AppEventType::INPUT_STATUS) {
