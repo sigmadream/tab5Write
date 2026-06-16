@@ -1,0 +1,6 @@
+[submodule "ref/scribe"]
+	path = ref/scribe
+	url = https://github.com/nibzard/scribe.git
+[submodule "ref/esp-bsp"]
+	path = ref/esp-bsp
+	url = https://github.com/espressif/esp-bsp.git

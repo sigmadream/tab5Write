@@ -1,0 +1,9 @@
+dependencies:
+  idf:
+    version: ">=6.0"
+  m5stack_tab5:
+    version: "*"
+  lvgl/lvgl:
+    version: "9.4.0"
+  espressif/usb_host_hid:
+    version: ">=1.0.3"
