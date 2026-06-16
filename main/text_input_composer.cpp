@@ -244,6 +244,10 @@ void TextInputComposer::toggle_input_mode() {
   set_input_mode(mode_ == InputMode::ENGLISH ? InputMode::KOREAN : InputMode::ENGLISH);
 }
 
+std::vector<TextInputEvent> TextInputComposer::flush_composition() {
+  return commit_composition();
+}
+
 void TextInputComposer::clear_composition() {
   state_ = ImeState::IDLE;
   cho_idx_ = -1;
@@ -290,7 +294,7 @@ std::vector<TextInputEvent> TextInputComposer::handle_key_event(const KeyEvent &
   }
 
   // Ctrl+Space 단축키로 한/영 전환
-  if (event.code == KeyCode::SPACE && (event.modifiers & KEY_MOD_LEFT_CTRL)) {
+  if (event.code == KeyCode::SPACE && (event.modifiers & (KEY_MOD_LEFT_CTRL | KEY_MOD_RIGHT_CTRL))) {
     std::vector<TextInputEvent> events = commit_composition();
     toggle_input_mode();
     LOG_I(TAG, "Input mode switched to %s", mode_ == InputMode::KOREAN ? "KOREAN" : "ENGLISH");
@@ -307,6 +311,11 @@ std::vector<TextInputEvent> TextInputComposer::handle_key_event(const KeyEvent &
 
 std::vector<TextInputEvent> TextInputComposer::handle_english_input(const KeyEvent &event) {
   std::vector<TextInputEvent> events;
+
+  if (event.code == KeyCode::BACKSPACE) {
+    events.push_back({TextInputEventType::DELETE_BACKWARD, "", KeyCode::BACKSPACE, event.modifiers});
+    return events;
+  }
 
   // 일반 영어 텍스트 입력
   if (event.printable != '\0') {

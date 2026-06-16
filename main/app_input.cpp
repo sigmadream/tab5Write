@@ -325,7 +325,7 @@ static char printable_from_hid_usage(uint8_t usage, uint8_t modifiers) {
   case HID_KEY_KEYPAD_ENTER:
     return '\n';
   case HID_KEY_DEL:
-    return '\b';
+    return 0;
   case HID_KEY_TAB:
     return '\t';
   case HID_KEY_SPACE:
@@ -465,7 +465,7 @@ static void run_key_mapping_self_test() {
       {HID_KEY_0, KeyCode::DIGIT_0, '0', ')'},
       {HID_KEY_ENTER, KeyCode::ENTER, '\n', '\n'},
       {HID_KEY_ESC, KeyCode::ESCAPE, 0, 0},
-      {HID_KEY_DEL, KeyCode::BACKSPACE, '\b', '\b'},
+      {HID_KEY_DEL, KeyCode::BACKSPACE, 0, 0},
       {HID_KEY_TAB, KeyCode::TAB, '\t', '\t'},
       {HID_KEY_SPACE, KeyCode::SPACE, ' ', ' '},
       {HID_KEY_MINUS, KeyCode::MINUS, '-', '_'},
@@ -774,6 +774,7 @@ static void send_key_event(uint8_t usage, KeyAction action, uint8_t modifiers) {
 
   AppEvent app_event = {};
   app_event.type = AppEventType::KEY_EVENT;
+  app_event.enqueued_at_us = esp_timer_get_time();
   app_event.key = key_event;
 
   if (ui_queue && xQueueSend(ui_queue, &app_event, 0) != pdTRUE) {
@@ -797,6 +798,7 @@ static void send_modifier_event(uint8_t modifier_bit, KeyAction action,
 
   AppEvent app_event = {};
   app_event.type = AppEventType::KEY_EVENT;
+  app_event.enqueued_at_us = esp_timer_get_time();
   app_event.key = key_event;
 
   if (ui_queue && xQueueSend(ui_queue, &app_event, 0) != pdTRUE) {
@@ -811,6 +813,7 @@ static void send_input_status(bool connected, uint16_t vid, uint16_t pid,
                               uint8_t protocol) {
   AppEvent app_event = {};
   app_event.type = AppEventType::INPUT_STATUS;
+  app_event.enqueued_at_us = esp_timer_get_time();
   app_event.input_status.connected = connected;
   app_event.input_status.vid = vid;
   app_event.input_status.pid = pid;

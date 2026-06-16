@@ -44,6 +44,7 @@ public:
 
   std::string get_composing_text() const;
   bool is_composing() const { return state_ != ImeState::IDLE; }
+  std::vector<TextInputEvent> flush_composition();
   void clear_composition();
 
 private:

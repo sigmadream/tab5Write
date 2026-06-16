@@ -6,8 +6,13 @@
 
 enum class AppEventType { KEY_EVENT, INPUT_STATUS, STORAGE_REQUEST, UI_COMMAND };
 
+enum class UiCommand : uint32_t {
+  DUMP_SNAPSHOT = 1,
+};
+
 struct AppEvent {
   AppEventType type;
+  int64_t enqueued_at_us;
   union {
     KeyEvent key;
     struct {
@@ -17,7 +22,7 @@ struct AppEvent {
       uint8_t protocol;
     } input_status;
     struct {
-      uint32_t command;
+      UiCommand command;
     } ui;
     struct {
       uint32_t request_id;

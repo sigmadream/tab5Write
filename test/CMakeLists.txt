@@ -19,3 +19,12 @@ add_executable(test_editor_core
     ../main/undo_stack.cpp
     ../main/editor_core.cpp
 )
+
+add_executable(test_keybinding
+    test_keybinding.cpp
+    ../main/text_input_composer.cpp
+    ../main/piece_table.cpp
+    ../main/undo_stack.cpp
+    ../main/editor_core.cpp
+    ../main/keybinding.cpp
+)
