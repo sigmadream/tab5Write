@@ -1,5 +1,6 @@
 #include "app_build_info.h"
 #include "app_display.h"
+#include "app_font.h"
 #include "app_input.h"
 #include "app_queue.h"
 #include "app_ui.h"
@@ -232,6 +233,9 @@ extern "C" void app_main(void) {
 
   // Initialize display and LVGL
   app_display_init();
+
+  // Initialize SD-backed fonts after LVGL is ready, with built-in fallback.
+  app_font_init();
 
   // Initialize queues
   app_queue_init();

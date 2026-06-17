@@ -2,6 +2,7 @@
 
 #include "app_event.h"
 #include "app_queue.h"
+#include "tab5_keyboard.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -24,6 +25,17 @@ static constexpr TickType_t HID_EVENT_QUEUE_TIMEOUT = pdMS_TO_TICKS(20);
 static constexpr uint32_t KEY_REPEAT_DELAY_MS = 500;
 static constexpr uint32_t KEY_REPEAT_INTERVAL_MS = 50;
 static constexpr size_t HID_REPORT_BUFFER_SIZE = 64;
+static constexpr size_t MAX_REPEATING_KEYS = HID_KEYBOARD_KEY_MAX + 2;
+static constexpr uint16_t TAB5_KEYBOARD_VID = 0xA164;
+static constexpr uint16_t TAB5_KEYBOARD_PID = 0x0001;
+static constexpr uint32_t TAB5_KEYBOARD_INITIAL_FAST_RETRIES = 3;
+static constexpr uint32_t TAB5_KEYBOARD_INITIAL_RETRY_MS = 1000;
+static constexpr uint32_t TAB5_KEYBOARD_OFFLINE_RETRY_MS = 30000;
+
+enum class InputSource : uint8_t {
+  USB,
+  TAB5,
+};
 
 enum class InputEventGroup : uint8_t {
   HID_HOST,
@@ -38,6 +50,7 @@ struct InputEvent {
 
 struct PressedKeyState {
   bool active;
+  InputSource source;
   uint8_t usage;
   uint8_t modifiers;
   uint32_t next_repeat_ms;
@@ -58,15 +71,27 @@ struct ModifierExpectation {
 
 static QueueHandle_t s_hid_event_queue;
 static portMUX_TYPE s_key_state_lock = portMUX_INITIALIZER_UNLOCKED;
-static PressedKeyState s_pressed_keys[HID_KEYBOARD_KEY_MAX];
+static PressedKeyState s_pressed_keys[MAX_REPEATING_KEYS];
 static uint8_t s_prev_boot_keys[HID_KEYBOARD_KEY_MAX];
 static uint8_t s_prev_modifiers;
 static bool s_initialized;
 static uint32_t s_keyboard_connect_count;
 static uint32_t s_keyboard_disconnect_count;
+static tabwrite::Tab5Keyboard s_tab5_keyboard;
+static uint8_t s_tab5_prev_usage;
+static uint8_t s_tab5_prev_modifiers;
+static bool s_tab5_keyboard_connected;
+static bool s_tab5_keyboard_seen_once;
+static uint32_t s_tab5_keyboard_retry_failures;
+static uint32_t s_tab5_keyboard_next_retry_ms;
+static bool s_tab5_keyboard_absence_logged;
 
 static uint32_t now_ms() {
   return static_cast<uint32_t>(esp_timer_get_time() / 1000ULL);
+}
+
+static bool time_reached(uint32_t now, uint32_t target) {
+  return static_cast<int32_t>(now - target) >= 0;
 }
 
 static bool is_shift_pressed(uint8_t modifiers) {
@@ -765,7 +790,23 @@ const char *key_code_name(KeyCode code) {
   }
 }
 
-static void send_key_event(uint8_t usage, KeyAction action, uint8_t modifiers) {
+static const char *input_source_name(InputSource source) {
+  switch (source) {
+  case InputSource::USB:
+    return "USB";
+  case InputSource::TAB5:
+    return "Tab5";
+  default:
+    return "Unknown";
+  }
+}
+
+static uint8_t effective_modifiers() {
+  return static_cast<uint8_t>(s_prev_modifiers | s_tab5_prev_modifiers);
+}
+
+static void send_key_event(InputSource source, uint8_t usage, KeyAction action,
+                           uint8_t modifiers) {
   KeyEvent key_event = {};
   key_event.code = key_code_from_hid_usage(usage);
   key_event.action = action;
@@ -782,14 +823,23 @@ static void send_key_event(uint8_t usage, KeyAction action, uint8_t modifiers) {
   }
 
   char printable_buffer[2] = {};
-  ESP_LOGI(TAG, "Key %s action=%s modifiers=0x%02x char=%s",
-           key_code_name(key_event.code), key_action_name(action), modifiers,
-           printable_for_log(key_event.printable, printable_buffer,
-                             sizeof(printable_buffer)));
+  const char *source_name = input_source_name(source);
+  const char *code_name = key_code_name(key_event.code);
+  const char *action_name = key_action_name(action);
+  const char *printable =
+      printable_for_log(key_event.printable, printable_buffer,
+                        sizeof(printable_buffer));
+  if (action == KeyAction::REPEAT) {
+    ESP_LOGD(TAG, "Key source=%s key=%s action=%s modifiers=0x%02x char=%s",
+             source_name, code_name, action_name, modifiers, printable);
+  } else {
+    ESP_LOGI(TAG, "Key source=%s key=%s action=%s modifiers=0x%02x char=%s",
+             source_name, code_name, action_name, modifiers, printable);
+  }
 }
 
-static void send_modifier_event(uint8_t modifier_bit, KeyAction action,
-                                uint8_t modifiers) {
+static void send_modifier_event(InputSource source, uint8_t modifier_bit,
+                                KeyAction action, uint8_t modifiers) {
   KeyEvent key_event = {};
   key_event.code = modifier_key_code(modifier_bit);
   key_event.action = action;
@@ -805,8 +855,9 @@ static void send_modifier_event(uint8_t modifier_bit, KeyAction action,
     ESP_LOGW(TAG, "UI queue full; dropped modifier event");
   }
 
-  ESP_LOGI(TAG, "Key %s action=%s modifiers=0x%02x",
-           key_code_name(key_event.code), key_action_name(action), modifiers);
+  ESP_LOGI(TAG, "Key source=%s key=%s action=%s modifiers=0x%02x",
+           input_source_name(source), key_code_name(key_event.code),
+           key_action_name(action), modifiers);
 }
 
 static void send_input_status(bool connected, uint16_t vid, uint16_t pid,
@@ -824,10 +875,11 @@ static void send_input_status(bool connected, uint16_t vid, uint16_t pid,
   }
 }
 
-static void update_repeat_state_on_press(uint8_t usage, uint8_t modifiers) {
+static void update_repeat_state_on_press(InputSource source, uint8_t usage,
+                                         uint8_t modifiers) {
   portENTER_CRITICAL(&s_key_state_lock);
   for (auto &key : s_pressed_keys) {
-    if (key.active && key.usage == usage) {
+    if (key.active && key.source == source && key.usage == usage) {
       key.modifiers = modifiers;
       portEXIT_CRITICAL(&s_key_state_lock);
       return;
@@ -836,6 +888,7 @@ static void update_repeat_state_on_press(uint8_t usage, uint8_t modifiers) {
   for (auto &key : s_pressed_keys) {
     if (!key.active) {
       key.active = true;
+      key.source = source;
       key.usage = usage;
       key.modifiers = modifiers;
       key.next_repeat_ms = now_ms() + KEY_REPEAT_DELAY_MS;
@@ -846,10 +899,10 @@ static void update_repeat_state_on_press(uint8_t usage, uint8_t modifiers) {
   portEXIT_CRITICAL(&s_key_state_lock);
 }
 
-static void update_repeat_state_on_release(uint8_t usage) {
+static void update_repeat_state_on_release(InputSource source, uint8_t usage) {
   portENTER_CRITICAL(&s_key_state_lock);
   for (auto &key : s_pressed_keys) {
-    if (key.active && key.usage == usage) {
+    if (key.active && key.source == source && key.usage == usage) {
       key = {};
       break;
     }
@@ -867,16 +920,70 @@ static void update_repeat_modifiers(uint8_t modifiers) {
   portEXIT_CRITICAL(&s_key_state_lock);
 }
 
-static void reset_keyboard_state() {
+static void emit_modifier_changes(InputSource source, uint8_t previous,
+                                  uint8_t current);
+
+static void reset_repeat_state(InputSource source) {
   portENTER_CRITICAL(&s_key_state_lock);
-  memset(s_pressed_keys, 0, sizeof(s_pressed_keys));
+  for (auto &key : s_pressed_keys) {
+    if (key.active && key.source == source) {
+      key = {};
+    }
+  }
+  portEXIT_CRITICAL(&s_key_state_lock);
+}
+
+static void reset_usb_keyboard_state() {
+  reset_repeat_state(InputSource::USB);
+  portENTER_CRITICAL(&s_key_state_lock);
   memset(s_prev_boot_keys, 0, sizeof(s_prev_boot_keys));
   s_prev_modifiers = 0;
   portEXIT_CRITICAL(&s_key_state_lock);
 }
 
-static void handle_modifier_changes(uint8_t modifiers) {
-  const uint8_t changed = s_prev_modifiers ^ modifiers;
+static void release_usb_keyboard_state() {
+  const uint8_t previous_effective_modifiers = effective_modifiers();
+  for (uint8_t usage : s_prev_boot_keys) {
+    if (usage > HID_KEY_ERROR_UNDEFINED) {
+      send_key_event(InputSource::USB, usage, KeyAction::RELEASE,
+                     previous_effective_modifiers);
+      update_repeat_state_on_release(InputSource::USB, usage);
+    }
+  }
+
+  s_prev_modifiers = 0;
+  const uint8_t current_effective_modifiers = effective_modifiers();
+  emit_modifier_changes(InputSource::USB, previous_effective_modifiers,
+                        current_effective_modifiers);
+  update_repeat_modifiers(current_effective_modifiers);
+  reset_usb_keyboard_state();
+}
+
+static void reset_tab5_keyboard_state() {
+  reset_repeat_state(InputSource::TAB5);
+  s_tab5_prev_usage = 0;
+  s_tab5_prev_modifiers = 0;
+}
+
+static void release_tab5_keyboard_state() {
+  const uint8_t previous_effective_modifiers = effective_modifiers();
+  if (s_tab5_prev_usage > HID_KEY_ERROR_UNDEFINED) {
+    send_key_event(InputSource::TAB5, s_tab5_prev_usage, KeyAction::RELEASE,
+                   previous_effective_modifiers);
+    update_repeat_state_on_release(InputSource::TAB5, s_tab5_prev_usage);
+  }
+
+  s_tab5_prev_modifiers = 0;
+  const uint8_t current_effective_modifiers = effective_modifiers();
+  emit_modifier_changes(InputSource::TAB5, previous_effective_modifiers,
+                        current_effective_modifiers);
+  update_repeat_modifiers(current_effective_modifiers);
+  reset_tab5_keyboard_state();
+}
+
+static void emit_modifier_changes(InputSource source, uint8_t previous,
+                                  uint8_t current) {
+  const uint8_t changed = previous ^ current;
   if (changed == 0) {
     return;
   }
@@ -886,11 +993,18 @@ static void handle_modifier_changes(uint8_t modifiers) {
     if ((changed & mask) == 0) {
       continue;
     }
-    send_modifier_event(mask, (modifiers & mask) ? KeyAction::PRESS
-                                                 : KeyAction::RELEASE,
-                        modifiers);
+    send_modifier_event(source, mask, (current & mask) ? KeyAction::PRESS
+                                                       : KeyAction::RELEASE,
+                        current);
   }
+}
+
+static void handle_usb_modifier_changes(uint8_t modifiers) {
+  const uint8_t previous = effective_modifiers();
   s_prev_modifiers = modifiers;
+  const uint8_t current = effective_modifiers();
+  emit_modifier_changes(InputSource::USB, previous, current);
+  update_repeat_modifiers(current);
 }
 
 static void handle_keyboard_report(const uint8_t *data, size_t length) {
@@ -904,22 +1018,25 @@ static void handle_keyboard_report(const uint8_t *data, size_t length) {
       reinterpret_cast<const hid_keyboard_input_report_boot_t *>(data);
   const uint8_t modifiers = report->modifier.val;
 
-  handle_modifier_changes(modifiers);
-  update_repeat_modifiers(modifiers);
+  handle_usb_modifier_changes(modifiers);
+  const uint8_t active_modifiers = effective_modifiers();
 
   for (int i = 0; i < HID_KEYBOARD_KEY_MAX; ++i) {
     const uint8_t prev_usage = s_prev_boot_keys[i];
     if (prev_usage > HID_KEY_ERROR_UNDEFINED &&
         !key_found(report->key, prev_usage)) {
-      send_key_event(prev_usage, KeyAction::RELEASE, modifiers);
-      update_repeat_state_on_release(prev_usage);
+      send_key_event(InputSource::USB, prev_usage, KeyAction::RELEASE,
+                     active_modifiers);
+      update_repeat_state_on_release(InputSource::USB, prev_usage);
     }
 
     const uint8_t current_usage = report->key[i];
     if (current_usage > HID_KEY_ERROR_UNDEFINED &&
         !key_found(s_prev_boot_keys, current_usage)) {
-      send_key_event(current_usage, KeyAction::PRESS, modifiers);
-      update_repeat_state_on_press(current_usage, modifiers);
+      send_key_event(InputSource::USB, current_usage, KeyAction::PRESS,
+                     active_modifiers);
+      update_repeat_state_on_press(InputSource::USB, current_usage,
+                                   active_modifiers);
     }
   }
 
@@ -957,7 +1074,7 @@ static void hid_interface_callback(hid_host_device_handle_t handle,
     ++s_keyboard_disconnect_count;
     ESP_LOGI(TAG, "HID keyboard disconnected count=%u",
              static_cast<unsigned>(s_keyboard_disconnect_count));
-    reset_keyboard_state();
+    release_usb_keyboard_state();
     send_input_status(false, 0, 0, params.proto);
     ESP_ERROR_CHECK(hid_host_device_close(handle));
     break;
@@ -1012,8 +1129,123 @@ static void handle_hid_device_event(hid_host_device_handle_t handle,
   }
   ESP_ERROR_CHECK(hid_host_device_start(handle));
 
-  reset_keyboard_state();
+  reset_usb_keyboard_state();
   send_input_status(true, vid, pid, params.proto);
+}
+
+
+static void handle_tab5_modifier_changes(uint8_t modifiers) {
+  const uint8_t previous = effective_modifiers();
+  s_tab5_prev_modifiers = modifiers;
+  const uint8_t current = effective_modifiers();
+  emit_modifier_changes(InputSource::TAB5, previous, current);
+  update_repeat_modifiers(current);
+}
+
+static void handle_tab5_hid_event(const tabwrite::Tab5KeyboardHidEvent &event,
+                                  void *user_data) {
+  (void)user_data;
+
+  const uint8_t modifiers = event.modifier;
+  handle_tab5_modifier_changes(modifiers);
+  const uint8_t active_modifiers = effective_modifiers();
+
+  if (event.keycode > HID_KEY_ERROR_UNDEFINED) {
+    if (s_tab5_prev_usage > HID_KEY_ERROR_UNDEFINED &&
+        s_tab5_prev_usage != event.keycode) {
+      send_key_event(InputSource::TAB5, s_tab5_prev_usage, KeyAction::RELEASE,
+                     active_modifiers);
+      update_repeat_state_on_release(InputSource::TAB5, s_tab5_prev_usage);
+    }
+    if (s_tab5_prev_usage != event.keycode) {
+      send_key_event(InputSource::TAB5, event.keycode, KeyAction::PRESS,
+                     active_modifiers);
+      update_repeat_state_on_press(InputSource::TAB5, event.keycode,
+                                   active_modifiers);
+    } else {
+      update_repeat_modifiers(active_modifiers);
+    }
+    s_tab5_prev_usage = event.keycode;
+    return;
+  }
+
+  if (s_tab5_prev_usage > HID_KEY_ERROR_UNDEFINED) {
+    send_key_event(InputSource::TAB5, s_tab5_prev_usage, KeyAction::RELEASE,
+                   active_modifiers);
+    update_repeat_state_on_release(InputSource::TAB5, s_tab5_prev_usage);
+    s_tab5_prev_usage = 0;
+  }
+}
+
+static void tab5_keyboard_monitor_task(void *arg) {
+  (void)arg;
+
+  while (true) {
+    const uint32_t now = now_ms();
+    if (s_tab5_keyboard_connected && !s_tab5_keyboard.is_initialized()) {
+      const esp_err_t last_error = s_tab5_keyboard.last_error();
+      s_tab5_keyboard_connected = false;
+      release_tab5_keyboard_state();
+      send_input_status(false, TAB5_KEYBOARD_VID, TAB5_KEYBOARD_PID,
+                        HID_PROTOCOL_KEYBOARD);
+      ESP_LOGW(TAG, "Tab5 Keyboard disconnected; retrying init last_error=%s",
+               esp_err_to_name(last_error));
+    }
+
+    if (!s_tab5_keyboard.is_initialized()) {
+      if (!time_reached(now, s_tab5_keyboard_next_retry_ms)) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        continue;
+      }
+
+      tabwrite::Tab5KeyboardConfig config = {};
+      const esp_err_t err = s_tab5_keyboard.begin(config);
+      if (err == ESP_OK) {
+        s_tab5_keyboard.set_hid_callback(handle_tab5_hid_event, nullptr);
+        reset_tab5_keyboard_state();
+        s_tab5_keyboard_connected = true;
+        s_tab5_keyboard_seen_once = true;
+        s_tab5_keyboard_retry_failures = 0;
+        s_tab5_keyboard_next_retry_ms = 0;
+        s_tab5_keyboard_absence_logged = false;
+        send_input_status(true, TAB5_KEYBOARD_VID, TAB5_KEYBOARD_PID,
+                          HID_PROTOCOL_KEYBOARD);
+        ESP_LOGI(TAG, "Tab5 Keyboard input initialized on I2C port=%d addr=0x%02x sda=%d scl=%d int=%d",
+                 static_cast<int>(config.port), config.address,
+                 static_cast<int>(config.sda), static_cast<int>(config.scl),
+                 static_cast<int>(config.interrupt));
+      } else {
+        if (s_tab5_keyboard_connected) {
+          s_tab5_keyboard_connected = false;
+          release_tab5_keyboard_state();
+          send_input_status(false, TAB5_KEYBOARD_VID, TAB5_KEYBOARD_PID,
+                            HID_PROTOCOL_KEYBOARD);
+        }
+        ++s_tab5_keyboard_retry_failures;
+        if (s_tab5_keyboard_seen_once) {
+          if (s_tab5_keyboard_retry_failures == 1 ||
+              s_tab5_keyboard_retry_failures % 5 == 0) {
+            ESP_LOGW(TAG, "Tab5 Keyboard offline; retry failed count=%u err=%s",
+                     static_cast<unsigned>(s_tab5_keyboard_retry_failures),
+                     esp_err_to_name(err));
+          }
+          s_tab5_keyboard_next_retry_ms = now + TAB5_KEYBOARD_INITIAL_RETRY_MS;
+        } else {
+          if (!s_tab5_keyboard_absence_logged) {
+            ESP_LOGI(TAG, "Tab5 Keyboard absent; continuing with USB/serial input and retrying in background");
+            s_tab5_keyboard_absence_logged = true;
+          }
+          const uint32_t retry_delay_ms =
+              s_tab5_keyboard_retry_failures < TAB5_KEYBOARD_INITIAL_FAST_RETRIES
+                  ? TAB5_KEYBOARD_INITIAL_RETRY_MS
+                  : TAB5_KEYBOARD_OFFLINE_RETRY_MS;
+          s_tab5_keyboard_next_retry_ms = now + retry_delay_ms;
+        }
+        ESP_LOGD(TAG, "Tab5 Keyboard not ready: %s", esp_err_to_name(err));
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(s_tab5_keyboard.is_initialized() ? 500 : 1000));
+  }
 }
 
 static void hid_driver_callback(hid_host_device_handle_t handle,
@@ -1078,16 +1310,18 @@ static void key_repeat_task(void *arg) {
   while (true) {
     const uint32_t now = now_ms();
     struct RepeatEvent {
+      InputSource source;
       uint8_t usage;
       uint8_t modifiers;
       uint32_t repeat_count;
     };
-    RepeatEvent repeats[HID_KEYBOARD_KEY_MAX] = {};
+    RepeatEvent repeats[MAX_REPEATING_KEYS] = {};
     size_t repeat_count = 0;
 
     portENTER_CRITICAL(&s_key_state_lock);
     for (auto &key : s_pressed_keys) {
       if (key.active && now >= key.next_repeat_ms) {
+        repeats[repeat_count].source = key.source;
         repeats[repeat_count].usage = key.usage;
         repeats[repeat_count].modifiers = key.modifiers;
         repeats[repeat_count].repeat_count = key.repeat_count + 1;
@@ -1105,7 +1339,7 @@ static void key_repeat_task(void *arg) {
                  key_code_name(key_code_from_hid_usage(repeats[i].usage)),
                  static_cast<unsigned>(repeats[i].repeat_count));
       }
-      send_key_event(repeats[i].usage, KeyAction::REPEAT,
+      send_key_event(repeats[i].source, repeats[i].usage, KeyAction::REPEAT,
                      repeats[i].modifiers);
     }
 
@@ -1146,6 +1380,12 @@ void app_input_init() {
       xTaskCreate(key_repeat_task, "key_repeat", 3072, nullptr, 4, nullptr);
   ESP_ERROR_CHECK(task_created == pdTRUE ? ESP_OK : ESP_ERR_NO_MEM);
 
+  task_created = xTaskCreate(tab5_keyboard_monitor_task, "tab5_kb_mon", 4096,
+                             nullptr, 4, nullptr);
+  if (task_created != pdTRUE) {
+    ESP_LOGW(TAG, "Tab5 Keyboard monitor task unavailable; continuing without built-in keyboard");
+  }
+
   s_initialized = true;
-  ESP_LOGI(TAG, "USB keyboard input initialized");
+  ESP_LOGI(TAG, "USB and Tab5 keyboard input initialized");
 }

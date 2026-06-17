@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 
+#include "app_font.h"
 #include "app_snapshot.h"
 #include "esp_log.h"
 #include "lvgl.h"
@@ -80,12 +81,12 @@ static void ensure_writing_screen() {
 
   lv_obj_t *title = lv_label_create(header);
   lv_label_set_text(title, "TABWRITE");
-  style_label(title, &lv_font_montserrat_20, THEME_TEXT_PRIMARY);
+  style_label(title, app_font_ui(), THEME_TEXT_PRIMARY);
   lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);
 
   mode_label = lv_label_create(header);
   lv_label_set_text(mode_label, "EN");
-  style_label(mode_label, &lv_font_montserrat_20, THEME_ACCENT);
+  style_label(mode_label, app_font_ui(), THEME_ACCENT);
   lv_obj_align(mode_label, LV_ALIGN_RIGHT_MID, 0, 0);
 
   text_view = text_view_create(writing_screen);
@@ -103,27 +104,27 @@ static void ensure_writing_screen() {
 
   word_count_label = lv_label_create(footer);
   lv_label_set_text(word_count_label, "0 words");
-  style_label(word_count_label, &lv_font_montserrat_14, THEME_TEXT_PRIMARY);
+  style_label(word_count_label, app_font_ui_small(), THEME_TEXT_PRIMARY);
   lv_obj_align(word_count_label, LV_ALIGN_LEFT_MID, 0, -9);
 
   memory_label = lv_label_create(footer);
-  lv_label_set_text(memory_label, "Memory only");
-  style_label(memory_label, &lv_font_montserrat_14, THEME_TEXT_SECONDARY);
+  lv_label_set_text_fmt(memory_label, "Memory only · %s", app_font_status_text());
+  style_label(memory_label, app_font_ui_small(), THEME_TEXT_SECONDARY);
   lv_obj_align(memory_label, LV_ALIGN_LEFT_MID, 0, 12);
 
   input_status_label = lv_label_create(footer);
   lv_label_set_text(input_status_label, "Keyboard disconnected");
-  style_label(input_status_label, &lv_font_montserrat_14, THEME_TEXT_SECONDARY);
+  style_label(input_status_label, app_font_ui_small(), THEME_TEXT_SECONDARY);
   lv_obj_align(input_status_label, LV_ALIGN_RIGHT_MID, 0, -9);
 
   toast_label = lv_label_create(footer);
   lv_label_set_text(toast_label, "Ready to write");
-  style_label(toast_label, &lv_font_montserrat_14, THEME_ACCENT);
+  style_label(toast_label, app_font_ui_small(), THEME_ACCENT);
   lv_obj_align(toast_label, LV_ALIGN_RIGHT_MID, 0, 12);
 
   debug_label = lv_label_create(writing_screen);
   lv_label_set_text(debug_label, "Ctrl+Space: EN/KO · Esc: menu placeholder");
-  style_label(debug_label, &lv_font_montserrat_14, THEME_TEXT_SECONDARY);
+  style_label(debug_label, app_font_ui_small(), THEME_TEXT_SECONDARY);
   lv_obj_align(debug_label, LV_ALIGN_BOTTOM_MID, 0, -58);
 
   update_input_status_label();
@@ -140,12 +141,12 @@ void app_ui_show_splash() {
 
   lv_obj_t *title = lv_label_create(screen);
   lv_label_set_text(title, "TABWRITE");
-  style_label(title, &lv_font_montserrat_20, THEME_TEXT_PRIMARY);
+  style_label(title, app_font_ui(), THEME_TEXT_PRIMARY);
   lv_obj_align(title, LV_ALIGN_CENTER, 0, -20);
 
   lv_obj_t *tagline = lv_label_create(screen);
   lv_label_set_text(tagline, "Open. Type. Your words are safe.");
-  style_label(tagline, &lv_font_montserrat_14, THEME_TEXT_SECONDARY);
+  style_label(tagline, app_font_ui_small(), THEME_TEXT_SECONDARY);
   lv_obj_align(tagline, LV_ALIGN_CENTER, 0, 20);
 
   lv_scr_load(screen);
@@ -202,6 +203,7 @@ void app_ui_update_writing_screen(const EditorCore &editor,
                         static_cast<unsigned>(editor.word_count()),
                         static_cast<unsigned>(editor.cursor().line + 1),
                         static_cast<unsigned>(editor.line_count()));
+  lv_label_set_text_fmt(memory_label, "Memory only · %s", app_font_status_text());
   lv_label_set_text(mode_label,
                     composer.get_input_mode() == InputMode::KOREAN ? "KO" : "EN");
   lv_obj_set_style_text_color(mode_label,

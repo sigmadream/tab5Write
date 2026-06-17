@@ -1,5 +1,6 @@
 #include "text_view.h"
 
+#include "app_font.h"
 #include "piece_table.h"
 #include "theme.h"
 
@@ -7,8 +8,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-LV_FONT_DECLARE(x12y12pxMaruMinyaHangul_36);
 
 namespace {
 
@@ -43,13 +42,7 @@ struct TextViewState {
 };
 
 const lv_font_t *editor_font() {
-  static lv_font_t font = lv_font_montserrat_20;
-  static bool initialized = false;
-  if (!initialized) {
-    font.fallback = &x12y12pxMaruMinyaHangul_36;
-    initialized = true;
-  }
-  return &font;
+  return app_font_editor();
 }
 
 int32_t line_height() {
